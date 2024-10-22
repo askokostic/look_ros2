@@ -1,0 +1,3 @@
+[submodule "looking"]
+	path = looking
+	url = https://github.com/vita-epfl/looking.git
