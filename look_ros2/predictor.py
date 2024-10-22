@@ -1,38 +1,60 @@
-
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge, CvBridgeError
-from PIL import Image as PILImage
+import os
+import sys
+import argparse
 import cv2
 import numpy as np
 import torch
-# import openpifpaf
-import sys
-import os
-import argparse
+from PIL import Image as PILImage
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge, CvBridgeError
+import rclpy
+from rclpy.node import Node
 
-INPUT_SIZE = 51
-
-sys.path.append(os.path.abspath('/workspaces/ws_caripu'))
+sys.path.append(os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '../../../')))
 
 from looking.utils.network import *
 from looking.utils.utils_predict import *
+
+INPUT_SIZE = 51
 
 
 class LookWrapper(Node):
     def __init__(self):
         super().__init__('look_wrapper')
 
-        parser = argparse.ArgumentParser(
-        prog='python3 predict', usage='%(prog)s [options] images', description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-        parser.add_argument('--version', action='version', version='Looking Model {version}'.format(version=0.1))
-        parser.add_argument('--transparency', default=0.4, type=float, help='transparency of the overlayed poses')
-        parser.add_argument('--looking_threshold', default=0.5, type=float, help='eye contact threshold')
-        parser.add_argument('--mode', default='joints', type=str, help='prediction mode')
+        # Parameters
+        self.declare_parameter('image_topic', '/image_topic')
+        self.declare_parameter('mode', 'joints')
+        self.image_topic = self.get_parameter('image_topic').value
+        self.mode = self.get_parameter('mode').value
 
-        # Pifpaf args
+        self.transparency = 0.4
+        self.eyecontact_thresh = 0.5
+        self.path_model = os.path.join(os.path.dirname(__file__), '../../../looking/models/predictor')
 
+        # Set device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Load pifpaf
+        self.pifpaf_predictor = load_pifpaf(self.parse_pifpaf_args())
+
+        # Load LOOK model
+        self.model = self.get_model().to(self.device)
+
+        self.bridge = CvBridge()
+
+        self.subscription = self.create_subscription(
+            Image,
+            self.image_topic,
+            self.image_cb,
+            1
+        )
+
+        self.publisher_ = self.create_publisher(Image, '/looking', 10)
+
+    def parse_pifpaf_args(self):
+        parser = argparse.ArgumentParser(prog='python3 predict', usage='%(prog)s [options] images', description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         parser.add_argument('-o', '--image-output', default=None, nargs='?', const=True, help='Whether to output an image, with the option to specify the output path or directory')
         parser.add_argument('--json-output', default=None, nargs='?', const=True, help='Whether to output a json file, with the option to specify the output path or directory')
         parser.add_argument('--batch_size', default=1, type=int, help='processing batch size')
@@ -50,33 +72,9 @@ class LookWrapper(Node):
         visualizer.cli(parser)
 
         args = parser.parse_args()
-
-        self.mode = args.mode
-        self.transparency = args.transparency
-        self.eyecontact_thresh = args.looking_threshold
-        self.track_time = False
-
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu")
-        self.bridge = CvBridge()
-
         args.device = self.device
-        self.predictor_ = load_pifpaf(args)
-        self.path_model = '/workspaces/ws_caripu/looking/models/predictor'
-        self.model = self.get_model().to(self.device)
 
-        self.declare_parameter(
-            'image_topic', '/zed/zed_node/right/image_rect_color')
-        self.image_topic = self.get_parameter('image_topic').value
-
-        self.subscription = self.create_subscription(
-            Image,
-            self.image_topic,
-            self.image_cb,
-            1
-        )
-
-        self.publisher_ = self.create_publisher(Image, '/looking', 10)
+        return args
 
     def image_cb(self, msg):
         try:
@@ -86,27 +84,22 @@ class LookWrapper(Node):
             self.get_logger().error(f"Failed to convert image: {e}")
             return
 
-        predictions, __, __ = self.predictor_.pil_image(pil_image)
-
-        pifpaf_outs = {
-            'json_data': predictions,
-            'image': pil_image
-        }
+        predictions, __, __ = self.pifpaf_predictor.pil_image(pil_image)
 
         im_size = (pil_image.size[0], pil_image.size[1])
-        boxes, keypoints = preprocess_pifpaf(
-            pifpaf_outs['json_data'], im_size, enlarge_boxes=False)
+        boxes, keypoints = preprocess_pifpaf(predictions, im_size, enlarge_boxes=False)
         if self.mode == 'joints':
             pred_labels = self.predict_look(boxes, keypoints, im_size)
         else:
             pred_labels = self.predict_look_alexnet(boxes, pil_image)
 
-        self.render_image(pifpaf_outs['image'], boxes, keypoints, pred_labels)
+        self.render_image(pil_image, boxes, keypoints, pred_labels)
 
+    # Source: https://github.com/vita-epfl/looking
     def get_model(self):
         if self.mode == 'joints':
             model = LookingModel(INPUT_SIZE)
-            print(self.device)
+            print("Running on: ", self.device)
             if not os.path.isfile(os.path.join(self.path_model, 'LookingModel_LOOK+PIE.p')):
                 """
                 DOWNLOAD(LOOKING_MODEL, os.path.join(self.path_model, 'Looking_Model.zip'), quiet=False)
@@ -133,8 +126,8 @@ class LookWrapper(Node):
             model.eval()
         return model
 
+    # Source: https://github.com/vita-epfl/looking
     def predict_look(self, boxes, keypoints, im_size, batch_wise=True):
-        label_look = []
         final_keypoints = []
         if batch_wise:
             if len(boxes) != 0:
@@ -173,6 +166,7 @@ class LookWrapper(Node):
                 out_labels = []
         return out_labels
 
+    # Source: https://github.com/vita-epfl/looking
     def predict_look_alexnet(self, boxes, image, batch_wise=True):
         out_labels = []
         data_transform = transforms.Compose([
@@ -206,32 +200,25 @@ class LookWrapper(Node):
             out_labels = []
         return out_labels
 
+    # Source: https://github.com/vita-epfl/looking
     def render_image(self, image, bbox, keypoints, pred_labels):
-        open_cv_image = np.array(image) 
+        open_cv_image = np.array(image)
         open_cv_image = open_cv_image[:, :, ::-1].copy()
-        
-        scale = 0.007
-        imageWidth, imageHeight, _ = open_cv_image.shape
-        font_scale = min(imageWidth,imageHeight)/(10/scale)
-
 
         mask = np.zeros(open_cv_image.shape, dtype=np.uint8)
         for i, label in enumerate(pred_labels):
 
             if label > self.eyecontact_thresh:
-                color = (0,255,0)
+                color = (0, 255, 0)
             else:
-                color = (0,0,255)
+                color = (0, 0, 255)
             mask = draw_skeleton(mask, keypoints[i], color)
-        mask = cv2.erode(mask,(7,7),iterations = 1)
-        mask = cv2.GaussianBlur(mask,(3,3),0)
-        #open_cv_image = cv2.addWeighted(open_cv_image, 0.5, np.ones(open_cv_image.shape, dtype=np.uint8)*255, 0.5, 1.0)
-        #open_cv_image = cv2.addWeighted(open_cv_image, 0.5, np.zeros(open_cv_image.shape, dtype=np.uint8), 0.5, 1.0)
+        mask = cv2.erode(mask, (7, 7), iterations=1)
+        mask = cv2.GaussianBlur(mask, (3, 3), 0)
         open_cv_image = cv2.addWeighted(open_cv_image, 1, mask, self.transparency, 1.0)
+        
         ros_image = self.bridge.cv2_to_imgmsg(open_cv_image, encoding='bgr8')
-        # cv2.imwrite(os.path.join(self.path_out, image_name[:-4]+'.predictions.png'), open_cv_image)
         self.publisher_.publish(ros_image)
-
 
 
 def main(args=None):
