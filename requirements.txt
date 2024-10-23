@@ -1,0 +1,9 @@
+gdown
+tqdm
+numpy<2
+opencv_python
+seaborn
+matplotlib
+openpifpaf==0.13.10
+scikit_image
+scikit_learn
