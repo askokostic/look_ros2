@@ -1,5 +1,6 @@
+from looking.utils.network import *
+from looking.utils.utils_predict import *
 import os
-import sys
 import argparse
 import cv2
 import numpy as np
@@ -10,12 +11,6 @@ from cv_bridge import CvBridge, CvBridgeError
 import rclpy
 from rclpy.node import Node
 
-sys.path.append(os.path.abspath(os.path.join(
-    os.path.dirname(__file__), '../../../')))
-
-from looking.utils.network import *
-from looking.utils.utils_predict import *
-
 INPUT_SIZE = 51
 
 
@@ -25,13 +20,11 @@ class LookWrapper(Node):
 
         # Parameters
         self.declare_parameter('image_topic', '/image_topic')
-        self.declare_parameter('mode', 'joints')
         self.image_topic = self.get_parameter('image_topic').value
-        self.mode = self.get_parameter('mode').value
 
         self.transparency = 0.4
         self.eyecontact_thresh = 0.5
-        self.path_model = os.path.join(os.path.dirname(__file__), '../../../looking/models/predictor')
+        self.path_model = os.path.join(os.path.dirname(__file__), '../looking/models/predictor')
 
         # Set device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -84,10 +77,11 @@ class LookWrapper(Node):
             self.get_logger().error(f"Failed to convert image: {e}")
             return
 
-        predictions, __, __ = self.pifpaf_predictor.pil_image(pil_image)
+        predictions, _, _ = self.pifpaf_predictor.pil_image(pil_image)
+        pred = [ann.json_data() for ann in predictions]
 
         im_size = (pil_image.size[0], pil_image.size[1])
-        boxes, keypoints = preprocess_pifpaf(predictions, im_size, enlarge_boxes=False)
+        boxes, keypoints = preprocess_pifpaf(pred, im_size, enlarge_boxes=False)
         if self.mode == 'joints':
             pred_labels = self.predict_look(boxes, keypoints, im_size)
         else:
@@ -97,33 +91,19 @@ class LookWrapper(Node):
 
     # Source: https://github.com/vita-epfl/looking
     def get_model(self):
-        if self.mode == 'joints':
-            model = LookingModel(INPUT_SIZE)
-            print("Running on: ", self.device)
-            if not os.path.isfile(os.path.join(self.path_model, 'LookingModel_LOOK+PIE.p')):
-                """
-                DOWNLOAD(LOOKING_MODEL, os.path.join(self.path_model, 'Looking_Model.zip'), quiet=False)
-                with ZipFile(os.path.join(self.path_model, 'Looking_Model.zip'), 'r') as zipObj:
-                    # Extract all the contents of zip file in current directory
-                    zipObj.extractall()
-                exit(0)"""
-                raise NotImplementedError
-            model.load_state_dict(torch.load(os.path.join(
-                self.path_model, 'LookingModel_LOOK+PIE.p'), map_location=self.device))
-            model.eval()
-        else:
-            model = AlexNet_head(self.device)
-            if not os.path.isfile(os.path.join(self.path_model, 'AlexNet_LOOK.p')):
-                """
-                DOWNLOAD(LOOKING_MODEL, os.path.join(self.path_model, 'Looking_Model.zip'), quiet=False)
-                with ZipFile(os.path.join(self.path_model, 'Looking_Model.zip'), 'r') as zipObj:
-                    # Extract all the contents of zip file in current directory
-                    zipObj.extractall()
-                exit(0)"""
-                raise NotImplementedError
-            model.load_state_dict(torch.load(
-                os.path.join(self.path_model, 'AlexNet_LOOK.p')))
-            model.eval()
+        model = LookingModel(INPUT_SIZE)
+        print("Running on: ", self.device)
+        if not os.path.isfile(os.path.join(self.path_model, 'LookingModel_LOOK+PIE.p')):
+            """
+            DOWNLOAD(LOOKING_MODEL, os.path.join(self.path_model, 'Looking_Model.zip'), quiet=False)
+            with ZipFile(os.path.join(self.path_model, 'Looking_Model.zip'), 'r') as zipObj:
+                # Extract all the contents of zip file in current directory
+                zipObj.extractall()
+            exit(0)"""
+            raise NotImplementedError
+        model.load_state_dict(torch.load(os.path.join(
+            self.path_model, 'LookingModel_LOOK+PIE.p'), map_location=self.device))
+        model.eval()
         return model
 
     # Source: https://github.com/vita-epfl/looking
