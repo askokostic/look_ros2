@@ -1,4 +1,5 @@
 from setuptools import find_packages, setup
+import os
 
 package_name = 'look_ros2'
 
@@ -10,6 +11,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/looking/models/predictor', ['looking/models/predictor/' + f for f in os.listdir('looking/models/predictor')]),
+        ('share/' + package_name + '/looking/utils', ['looking/utils/' + f for f in os.listdir('looking/utils')])
     ],
     install_requires=[
         'setuptools',
@@ -22,7 +25,7 @@ setup(
     maintainer='Aleksa Kostic',
     maintainer_email='aleksa.kostic.fl@ait.ac.at',
     description='ROS2 wrapper for LOOK - a gaze detector',
-    license='AIT',
+    license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
