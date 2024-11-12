@@ -6,10 +6,12 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image as PILImage
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
 import rclpy
 from rclpy.node import Node
+from message_filters import Subscriber, ApproximateTimeSynchronizer
+from visualization_msgs.msg import MarkerArray, Marker
 
 INPUT_SIZE = 51
 
@@ -19,13 +21,19 @@ class LookWrapper(Node):
         super().__init__('look_wrapper')
 
         # Parameters
-        self.declare_parameter('color_image_topic', '/image_topic')
+        self.declare_parameter('color_image_topic', '/zed/zed_node/rgb_raw/image_raw_color')
+        self.declare_parameter('depth_image_topic', '/zed/zed_node/depth/depth_registered')
+        self.declare_parameter('color_camera_info_topic', '/zed/zed_node/rgb_raw/camera_info')
         self.color_image_topic = self.get_parameter('color_image_topic').value
+        self.depth_image_topic = self.get_parameter('depth_image_topic').value
+        self.color_camera_info_topic = self.get_parameter('color_camera_info_topic').value
 
         # Variables
         self.transparency = 0.4
         self.eyecontact_thresh = 0.5
         self.path_model = os.path.join(os.path.dirname(__file__), '../looking/models/predictor')
+        self.intrinsics = None
+        self.depth_image_cv = None
         self.keypoints = None
         self.boxes = None
 
@@ -40,14 +48,22 @@ class LookWrapper(Node):
 
         self.bridge = CvBridge()
 
-        self.color_img_sub = self.create_subscription(
-            Image,
-            self.color_image_topic,
-            self.color_image_cb,
+        self.color_camera_info_sub = self.create_subscription(
+            CameraInfo,
+            self.color_camera_info_topic,
+            self.color_camera_info_cb,
             10
         )
 
+        self.color_img_sub = Subscriber(self, Image, self.color_image_topic)
+        self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic)
+
+        self.depth_color_sync = ApproximateTimeSynchronizer(
+            [self.color_img_sub, self.depth_img_sub], queue_size=1, slop=0.1)
+        self.depth_color_sync.registerCallback(self.synced_image_cb)
+
         self.look_debug_pub = self.create_publisher(Image, '/looking', 10)
+        self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
 
     def parse_pifpaf_args(self):
         parser = argparse.ArgumentParser(prog='python3 predict', usage='%(prog)s [options] images', description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -72,9 +88,10 @@ class LookWrapper(Node):
 
         return args
 
-    def color_image_cb(self, color_img):
+    def synced_image_cb(self, color_img, depth_img):
         try:
             color_image_cv = self.bridge.imgmsg_to_cv2(color_img, desired_encoding='rgb8')
+            self.depth_image_cv = self.bridge.imgmsg_to_cv2(depth_img, desired_encoding='32FC1')
             pil_image = PILImage.fromarray(color_image_cv)
         except CvBridgeError as e:
             self.get_logger().error(f"Failed to convert image: {e}")
@@ -88,6 +105,17 @@ class LookWrapper(Node):
         pred_labels = self.predict_look(im_size)
 
         self.render_image(pil_image, pred_labels, color_img.header)
+
+        projected_boxes_3d = self.project_2d_box_to_3d()
+        self.publish_3d_bounding_boxes(projected_boxes_3d, color_img.header)
+
+    def color_camera_info_cb(self, msg):
+        self.intrinsics = {
+            'fx': msg.k[0],
+            'fy': msg.k[4],
+            'cx': msg.k[2],
+            'cy': msg.k[5]
+        }
 
     # Source: https://github.com/vita-epfl/looking
     def get_model(self):
@@ -162,10 +190,123 @@ class LookWrapper(Node):
         mask = cv2.erode(mask, (7, 7), iterations=1)
         mask = cv2.GaussianBlur(mask, (3, 3), 0)
         open_cv_image = cv2.addWeighted(open_cv_image, 1, mask, self.transparency, 1.0)
-        
+
         ros_image = self.bridge.cv2_to_imgmsg(open_cv_image, encoding='bgr8')
         ros_image.header = header
         self.look_debug_pub.publish(ros_image)
+
+    def project_2d_box_to_3d(self):
+        projected_boxes_3d = []
+
+        for keypoints, box in zip(self.keypoints, self.boxes):
+            x1, y1, x2, y2 = map(round, box[:4])
+            median_depth = self.get_person_depth(keypoints)
+            if np.isnan(median_depth):
+                continue
+            corners_2d = [
+                (x1, y1),   # Top-left
+                (x2, y1),   # Top-right
+                (x1, y2),   # Bottom-left
+                (x2, y2)    # Bottom-right
+            ]
+            corners_3d = [
+                self.project_2d_to_3d(cx, cy, median_depth) for cx, cy in corners_2d
+            ]
+            projected_boxes_3d.append(corners_3d)
+
+        return projected_boxes_3d
+
+    def project_2d_to_3d(self, x, y, depth_value):
+        fx, fy, cx, cy = self.intrinsics['fx'], self.intrinsics['fy'], self.intrinsics['cx'], self.intrinsics['cy']
+        Z = depth_value
+        X = (x - cx) * Z / fx
+        Y = (y - cy) * Z / fy
+        return np.array([X, Y, Z])
+
+    def get_person_depth(self, person_keypoints):
+        X, Y, _, _ = convert(person_keypoints)
+
+        torso_indices = [5, 6, 11, 12] # Left shoulder, Right shoulder, Left hip, Right hip
+        if any(np.isnan(X[idx]) or np.isnan(Y[idx]) for idx in torso_indices):
+            return np.nan
+
+        torso_polygon_points = np.array([
+            [int(round(X[idx])), int(round(Y[idx]))] for idx in torso_indices
+        ], dtype=np.int32)
+
+        x, y, w, h = cv2.boundingRect(torso_polygon_points)
+
+        img_height, img_width = self.depth_image_cv.shape[:2]
+
+        x = np.clip(x, 0, img_width - 1)
+        y = np.clip(y, 0, img_height - 1)
+        w = np.clip(x+w, 0, img_width - 1) - x
+        h = np.clip(y+h, 0, img_height - 1) - y
+
+        roi_polygon_points = torso_polygon_points - [x, y]
+        depth_image_roi = self.depth_image_cv[y:y+h, x:x+w]
+
+        torso_mask_roi = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(torso_mask_roi, [roi_polygon_points], 255)
+
+        torso_depth_values = depth_image_roi[torso_mask_roi == 255]
+        valid_torso_depth_values = torso_depth_values[
+            ~np.isnan(torso_depth_values) & ~np.isinf(torso_depth_values)
+        ]
+
+        if valid_torso_depth_values.size == 0:
+            return np.nan
+
+        return np.median(valid_torso_depth_values)
+
+    def publish_3d_bounding_boxes(self, boxes_3d, header):
+        marker_array = MarkerArray()
+
+        for i, front_corners in enumerate(boxes_3d):
+            marker = Marker()
+            marker.header = header
+            marker.ns = "bounding_boxes"
+            marker.id = i
+            marker.type = Marker.CUBE
+            marker.action = Marker.ADD
+
+            x_coords = [corner[0] for corner in front_corners]
+            y_coords = [corner[1] for corner in front_corners]
+            z_coords = [corner[2] for corner in front_corners]
+            z_front = z_coords[0]  # All z_coords are the same
+
+            width = max(x_coords) - min(x_coords)
+            height = max(y_coords) - min(y_coords)
+            depth = width  # Assuming depth equals width
+
+            center_x = (min(x_coords) + max(x_coords)) / 2.0
+            center_y = (min(y_coords) + max(y_coords)) / 2.0
+            center_z = z_front  # Since all z_coords are the same
+
+            marker.pose.position.x = center_x
+            marker.pose.position.y = center_y
+            marker.pose.position.z = center_z
+
+            marker.pose.orientation.x = 0.0
+            marker.pose.orientation.y = 0.0
+            marker.pose.orientation.z = 0.0
+            marker.pose.orientation.w = 1.0
+
+            marker.scale.x = width
+            marker.scale.y = height
+            marker.scale.z = depth
+
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+            marker.color.a = 0.7
+
+            marker_array.markers.append(marker)
+
+        for idx, m in enumerate(marker_array.markers):
+            m.id = idx
+
+        self.marker_pub.publish(marker_array)
 
 
 def main(args=None):
