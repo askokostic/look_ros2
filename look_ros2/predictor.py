@@ -19,12 +19,15 @@ class LookWrapper(Node):
         super().__init__('look_wrapper')
 
         # Parameters
-        self.declare_parameter('image_topic', '/image_topic')
-        self.image_topic = self.get_parameter('image_topic').value
+        self.declare_parameter('color_image_topic', '/image_topic')
+        self.color_image_topic = self.get_parameter('color_image_topic').value
 
+        # Variables
         self.transparency = 0.4
         self.eyecontact_thresh = 0.5
         self.path_model = os.path.join(os.path.dirname(__file__), '../looking/models/predictor')
+        self.keypoints = None
+        self.boxes = None
 
         # Set device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,14 +40,14 @@ class LookWrapper(Node):
 
         self.bridge = CvBridge()
 
-        self.subscription = self.create_subscription(
+        self.color_img_sub = self.create_subscription(
             Image,
-            self.image_topic,
-            self.image_cb,
-            1
+            self.color_image_topic,
+            self.color_image_cb,
+            10
         )
 
-        self.publisher_ = self.create_publisher(Image, '/looking', 10)
+        self.look_debug_pub = self.create_publisher(Image, '/looking', 10)
 
     def parse_pifpaf_args(self):
         parser = argparse.ArgumentParser(prog='python3 predict', usage='%(prog)s [options] images', description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -69,10 +72,10 @@ class LookWrapper(Node):
 
         return args
 
-    def image_cb(self, msg):
+    def color_image_cb(self, color_img):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
-            pil_image = PILImage.fromarray(cv_image)
+            color_image_cv = self.bridge.imgmsg_to_cv2(color_img, desired_encoding='rgb8')
+            pil_image = PILImage.fromarray(color_image_cv)
         except CvBridgeError as e:
             self.get_logger().error(f"Failed to convert image: {e}")
             return
@@ -81,13 +84,10 @@ class LookWrapper(Node):
         pred = [ann.json_data() for ann in predictions]
 
         im_size = (pil_image.size[0], pil_image.size[1])
-        boxes, keypoints = preprocess_pifpaf(pred, im_size, enlarge_boxes=False)
-        if self.mode == 'joints':
-            pred_labels = self.predict_look(boxes, keypoints, im_size)
-        else:
-            pred_labels = self.predict_look_alexnet(boxes, pil_image)
+        self.boxes, self.keypoints = preprocess_pifpaf(pred, im_size, enlarge_boxes=False)
+        pred_labels = self.predict_look(im_size)
 
-        self.render_image(pil_image, boxes, keypoints, pred_labels)
+        self.render_image(pil_image, pred_labels, color_img.header)
 
     # Source: https://github.com/vita-epfl/looking
     def get_model(self):
@@ -107,12 +107,12 @@ class LookWrapper(Node):
         return model
 
     # Source: https://github.com/vita-epfl/looking
-    def predict_look(self, boxes, keypoints, im_size, batch_wise=True):
+    def predict_look(self, im_size, batch_wise=True):
         final_keypoints = []
         if batch_wise:
-            if len(boxes) != 0:
-                for i in range(len(boxes)):
-                    kps = keypoints[i]
+            if len(self.boxes) != 0:
+                for i in range(len(self.boxes)):
+                    kps = self.keypoints[i]
                     kps_final = np.array(
                         [kps[0], kps[1], kps[2]]).flatten().tolist()
                     X, Y = kps_final[:17], kps_final[17:34]
@@ -127,9 +127,9 @@ class LookWrapper(Node):
             else:
                 out_labels = []
         else:
-            if len(boxes) != 0:
-                for i in range(len(boxes)):
-                    kps = keypoints[i]
+            if len(self.boxes) != 0:
+                for i in range(len(self.boxes)):
+                    kps = self.keypoints[i]
                     kps_final = np.array(
                         [kps[0], kps[1], kps[2]]).flatten().tolist()
                     X, Y = kps_final[:17], kps_final[17:34]
@@ -147,41 +147,7 @@ class LookWrapper(Node):
         return out_labels
 
     # Source: https://github.com/vita-epfl/looking
-    def predict_look_alexnet(self, boxes, image, batch_wise=True):
-        out_labels = []
-        data_transform = transforms.Compose([
-            SquarePad(),
-            transforms.Resize((227, 227)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])])
-        if len(boxes) != 0:
-            if batch_wise:
-                heads = []
-                for i in range(len(boxes)):
-                    bbox = boxes[i]
-                    x1, y1, x2, y2, _ = bbox
-                    w, h = abs(x2-x1), abs(y2-y1)
-                    head_image = Image.fromarray(
-                        np.array(image)[int(y1):int(y1+(h/3)), int(x1):int(x2), :])
-                    head_tensor = data_transform(head_image)
-                    heads.append(head_tensor.detach().cpu().numpy())
-                for i in range(len(boxes)):
-                    bbox = boxes[i]
-                    x1, y1, x2, y2, _ = bbox
-                    w, h = abs(x2-x1), abs(y2-y1)
-                    head_image = Image.fromarray(
-                        np.array(image)[int(y1):int(y1+(h/3)), int(x1):int(x2), :])
-                    head_tensor = data_transform(head_image)
-                    looking_label = self.model(torch.Tensor(head_tensor).unsqueeze(
-                        0).to(self.device)).detach().cpu().numpy().reshape(-1)[0]
-                    out_labels.append(looking_label)
-        else:
-            out_labels = []
-        return out_labels
-
-    # Source: https://github.com/vita-epfl/looking
-    def render_image(self, image, bbox, keypoints, pred_labels):
+    def render_image(self, image, pred_labels, header):
         open_cv_image = np.array(image)
         open_cv_image = open_cv_image[:, :, ::-1].copy()
 
@@ -192,13 +158,14 @@ class LookWrapper(Node):
                 color = (0, 255, 0)
             else:
                 color = (0, 0, 255)
-            mask = draw_skeleton(mask, keypoints[i], color)
+            mask = draw_skeleton(mask, self.keypoints[i], color)
         mask = cv2.erode(mask, (7, 7), iterations=1)
         mask = cv2.GaussianBlur(mask, (3, 3), 0)
         open_cv_image = cv2.addWeighted(open_cv_image, 1, mask, self.transparency, 1.0)
         
         ros_image = self.bridge.cv2_to_imgmsg(open_cv_image, encoding='bgr8')
-        self.publisher_.publish(ros_image)
+        ros_image.header = header
+        self.look_debug_pub.publish(ros_image)
 
 
 def main(args=None):
