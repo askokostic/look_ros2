@@ -12,7 +12,10 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/looking/models/predictor', ['looking/models/predictor/' + f for f in os.listdir('looking/models/predictor')]),
-        ('share/' + package_name + '/looking/utils', ['looking/utils/' + f for f in os.listdir('looking/utils')])
+            ('share/' + package_name + '/looking/utils', [
+        'looking/utils/utils_predict.py',
+        'looking/utils/network.py'
+    ])
     ],
     install_requires=[
         'setuptools',
