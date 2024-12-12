@@ -12,6 +12,7 @@ import rclpy
 from rclpy.node import Node
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from visualization_msgs.msg import MarkerArray, Marker
+from zed_interfaces.msg import ObjectsStamped, Object
 
 INPUT_SIZE = 51
 
@@ -21,7 +22,7 @@ class LookWrapper(Node):
         super().__init__('look_wrapper')
 
         # Parameters
-        self.declare_parameter('color_image_topic', '/zed/zed_node/rgb_raw/image_raw_color')
+        self.declare_parameter('color_image_topic', '/zed/zed_node/left/image_rect_color')
         self.declare_parameter('depth_image_topic', '/zed/zed_node/depth/depth_registered')
         self.declare_parameter('color_camera_info_topic', '/zed/zed_node/rgb_raw/camera_info')
         self.color_image_topic = self.get_parameter('color_image_topic').value
@@ -61,9 +62,11 @@ class LookWrapper(Node):
         self.depth_color_sync = ApproximateTimeSynchronizer(
             [self.color_img_sub, self.depth_img_sub], queue_size=1, slop=0.1)
         self.depth_color_sync.registerCallback(self.synced_image_cb)
+        
+        self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
+        self.zed_object_pub = self.create_publisher(ObjectsStamped, 'detection', 10)
 
         self.look_debug_pub = self.create_publisher(Image, '/looking', 10)
-        self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
 
     def parse_pifpaf_args(self):
         parser = argparse.ArgumentParser(prog='python3 predict', usage='%(prog)s [options] images', description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -108,6 +111,7 @@ class LookWrapper(Node):
 
         projected_boxes_3d = self.project_2d_box_to_3d()
         self.publish_3d_bounding_boxes(projected_boxes_3d, color_img.header)
+        self.publish_zed_object(projected_boxes_3d)
 
     def color_camera_info_cb(self, msg):
         self.intrinsics = {
@@ -308,6 +312,77 @@ class LookWrapper(Node):
 
         self.marker_pub.publish(marker_array)
 
+    def publish_zed_object(self, boxes_3d):
+        zed_detections = ObjectsStamped()
+        zed_detections.header.frame_id = 'zed_left_camera_optical_frame'
+        zed_detections.header.stamp = self.get_clock().now().to_msg()
+
+        for i, front_corners in enumerate(boxes_3d):
+
+            x_coords = [corner[0] for corner in front_corners]
+            y_coords = [corner[1] for corner in front_corners]
+            z_coords = [corner[2] for corner in front_corners]
+            z_front = z_coords[0]  # All z_coords are the same
+
+            width = max(x_coords) - min(x_coords)
+            height = max(y_coords) - min(y_coords)
+            depth = width  # Assuming depth equals width
+
+            center_x = (min(x_coords) + max(x_coords)) / 2.0
+            center_y = (min(y_coords) + max(y_coords)) / 2.0
+            center_z = z_front  # Since all z_coords are the same
+
+            det_object = Object()
+            det_object.label = 'person'
+            det_object.label_id = i
+            det_object.position[0] = center_x
+            det_object.position[1] = center_y
+            det_object.position[2] = center_z
+            det_object.tracking_available = False
+
+            # Top face
+            det_object.bounding_box_3d.corners[0].kp[0] = center_x - (width / 2)
+            det_object.bounding_box_3d.corners[0].kp[1] = center_y - (height / 2)
+            det_object.bounding_box_3d.corners[0].kp[2] = center_z - (depth / 2)
+
+            det_object.bounding_box_3d.corners[1].kp[0] = center_x - (width / 2)
+            det_object.bounding_box_3d.corners[1].kp[1] = center_y - (height / 2)
+            det_object.bounding_box_3d.corners[1].kp[2] = center_z + (depth / 2)
+
+            det_object.bounding_box_3d.corners[2].kp[0] = center_x + (width / 2)
+            det_object.bounding_box_3d.corners[2].kp[1] = center_y - (height / 2)
+            det_object.bounding_box_3d.corners[2].kp[2] = center_z + (depth / 2)
+
+            det_object.bounding_box_3d.corners[3].kp[0] = center_x + (width / 2)
+            det_object.bounding_box_3d.corners[3].kp[1] = center_y - (height / 2)
+            det_object.bounding_box_3d.corners[3].kp[2] = center_z - (depth / 2)
+
+            # Bottom face
+            det_object.bounding_box_3d.corners[4].kp[0] = center_x - (width / 2)
+            det_object.bounding_box_3d.corners[4].kp[1] = center_y + (height / 2)
+            det_object.bounding_box_3d.corners[4].kp[2] = center_z - (depth / 2)
+
+            det_object.bounding_box_3d.corners[5].kp[0] = center_x - (width / 2)
+            det_object.bounding_box_3d.corners[5].kp[1] = center_y + (height / 2)
+            det_object.bounding_box_3d.corners[5].kp[2] = center_z + (depth / 2)
+
+            det_object.bounding_box_3d.corners[6].kp[0] = center_x + (width / 2)
+            det_object.bounding_box_3d.corners[6].kp[1] = center_y + (height / 2)
+            det_object.bounding_box_3d.corners[6].kp[2] = center_z + (depth / 2)
+
+            det_object.bounding_box_3d.corners[7].kp[0] = center_x + (width / 2)
+            det_object.bounding_box_3d.corners[7].kp[1] = center_y + (height / 2)
+            det_object.bounding_box_3d.corners[7].kp[2] = center_z - (depth / 2)
+
+            det_object.dimensions_3d[0] = width
+            det_object.dimensions_3d[1] = depth
+            det_object.dimensions_3d[2] = height
+
+            det_object.skeleton_available = False
+
+            zed_detections.objects.append(det_object)
+
+        self.zed_object_pub.publish(zed_detections)
 
 def main(args=None):
     rclpy.init(args=args)
