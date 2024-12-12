@@ -25,9 +25,13 @@ class LookWrapper(Node):
         self.declare_parameter('color_image_topic', '/zed/zed_node/left/image_rect_color')
         self.declare_parameter('depth_image_topic', '/zed/zed_node/depth/depth_registered')
         self.declare_parameter('color_camera_info_topic', '/zed/zed_node/rgb_raw/camera_info')
+        self.declare_parameter('mode', 'pifpaf')
+        self.declare_parameter('downscale_factor', 1)
         self.color_image_topic = self.get_parameter('color_image_topic').value
         self.depth_image_topic = self.get_parameter('depth_image_topic').value
         self.color_camera_info_topic = self.get_parameter('color_camera_info_topic').value
+        self.mode = self.get_parameter('mode').value
+        self.downscale_factor = self.get_parameter('downscale_factor').value
 
         # Variables
         self.transparency = 0.4
@@ -58,13 +62,18 @@ class LookWrapper(Node):
 
         self.color_img_sub = Subscriber(self, Image, self.color_image_topic)
         self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic)
+        self.zed_body_det_sub = Subscriber(self, ObjectsStamped, "/zed/zed_node/body_trk/skeletons")
 
-        self.depth_color_sync = ApproximateTimeSynchronizer(
-            [self.color_img_sub, self.depth_img_sub], queue_size=1, slop=0.1)
-        self.depth_color_sync.registerCallback(self.synced_image_cb)
-        
-        self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
-        self.zed_object_pub = self.create_publisher(ObjectsStamped, 'detection', 10)
+        if self.mode == 'pifpaf':
+            self.depth_color_sync = ApproximateTimeSynchronizer(
+                [self.color_img_sub, self.depth_img_sub], queue_size=1, slop=0.1)
+            self.depth_color_sync.registerCallback(self.synced_image_cb)
+            self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
+            self.zed_object_pub = self.create_publisher(ObjectsStamped, 'detection', 10)
+        elif self.mode == 'zed':
+            self.body_color_sync = ApproximateTimeSynchronizer(
+                [self.color_img_sub, self.zed_body_det_sub], queue_size=1, slop=0.1)
+            self.body_color_sync.registerCallback(self.synced_body_image_cb)
 
         self.look_debug_pub = self.create_publisher(Image, '/looking', 10)
 
@@ -112,6 +121,50 @@ class LookWrapper(Node):
         projected_boxes_3d = self.project_2d_box_to_3d()
         self.publish_3d_bounding_boxes(projected_boxes_3d, color_img.header)
         self.publish_zed_object(projected_boxes_3d)
+
+    def synced_body_image_cb(self, color_img, zed_object_array):
+        try:
+            color_image_cv = self.bridge.imgmsg_to_cv2(color_img, desired_encoding='rgb8')
+            pil_image = PILImage.fromarray(color_image_cv)
+        except CvBridgeError as e:
+            self.get_logger().error(f"Failed to convert image: {e}")
+            return
+
+        im_size = (pil_image.size[0], pil_image.size[1])
+
+        bboxes = []
+        keypoints = []
+        for obj in zed_object_array.objects:
+            x_coords = [corner.kp[0] / self.downscale_factor for corner in obj.bounding_box_2d.corners]
+            y_coords = [corner.kp[1] / self.downscale_factor for corner in obj.bounding_box_2d.corners]
+
+            x1, x2 = max(min(x_coords), 0), max(max(x_coords), 0)
+            y1, y2 = max(min(y_coords), 0), max(max(y_coords), 0)
+            confidence = obj.confidence / 100
+
+            bboxes.append([x1, y1, x2, y2, confidence])
+
+            # Process keypoints (only first 18 keypoints are relevant)
+            skeleton_kps = obj.skeleton_2d.keypoints[:18]
+            kp_confs = obj.skeleton_keypoint_confidence[:18]
+
+            x_kps = []
+            y_kps = []
+            c_kps = []
+
+            for kp, kp_conf in zip(skeleton_kps, kp_confs):
+                x_kps.append(max(0, min((kp.kp[0] / self.downscale_factor), pil_image.size[0])))
+                y_kps.append(max(0, min((kp.kp[1] / self.downscale_factor), pil_image.size[1])))
+                c_kps.append(0.0 if np.isnan(kp_conf) else kp_conf)
+
+            keypoints.append([remap_keypoint(x_kps), remap_keypoint(y_kps), remap_keypoint(c_kps)])
+
+        self.boxes = bboxes
+        self.keypoints = keypoints
+
+        pred_labels = self.predict_look(im_size)
+
+        self.render_image(pil_image, pred_labels, color_img.header)
 
     def color_camera_info_cb(self, msg):
         self.intrinsics = {
@@ -383,6 +436,13 @@ class LookWrapper(Node):
             zed_detections.objects.append(det_object)
 
         self.zed_object_pub.publish(zed_detections)
+
+
+def remap_keypoint(source_list):
+    # Remaps body keypoints from ZED (BODY_18) to PifPaf (COCO 17) format.
+    source_indices = [0, 14, 15, 16, 17, 2, 5, 3, 6, 4, 7, 8, 11, 9, 12, 10, 13]
+    return [source_list[i] for i in source_indices]
+
 
 def main(args=None):
     rclpy.init(args=args)
