@@ -25,11 +25,13 @@ class LookWrapper(Node):
         self.declare_parameter('color_image_topic', '/zed/zed_node/left/image_rect_color')
         self.declare_parameter('depth_image_topic', '/zed/zed_node/depth/depth_registered')
         self.declare_parameter('color_camera_info_topic', '/zed/zed_node/rgb_raw/camera_info')
+        self.declare_parameter('zed_skeletons_topic', '/zed/zed_node/body_trk/skeletons')
         self.declare_parameter('mode', 'pifpaf')
         self.declare_parameter('downscale_factor', 1)
         self.color_image_topic = self.get_parameter('color_image_topic').value
         self.depth_image_topic = self.get_parameter('depth_image_topic').value
         self.color_camera_info_topic = self.get_parameter('color_camera_info_topic').value
+        self.zed_skeletons_topic = self.get_parameter('zed_skeletons_topic').value
         self.mode = self.get_parameter('mode').value
         self.downscale_factor = self.get_parameter('downscale_factor').value
 
@@ -62,7 +64,7 @@ class LookWrapper(Node):
 
         self.color_img_sub = Subscriber(self, Image, self.color_image_topic)
         self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic)
-        self.zed_body_det_sub = Subscriber(self, ObjectsStamped, "/zed/zed_node/body_trk/skeletons")
+        self.zed_body_det_sub = Subscriber(self, ObjectsStamped, self.zed_skeletons_topic)
 
         if self.mode == 'pifpaf':
             self.depth_color_sync = ApproximateTimeSynchronizer(
@@ -103,8 +105,10 @@ class LookWrapper(Node):
     def synced_image_cb(self, color_img, depth_img):
         try:
             color_image_cv = self.bridge.imgmsg_to_cv2(color_img, desired_encoding='rgb8')
-            self.depth_image_cv = self.bridge.imgmsg_to_cv2(depth_img, desired_encoding='32FC1')
-            pil_image = PILImage.fromarray(color_image_cv)
+            depth_image_cv = self.bridge.imgmsg_to_cv2(depth_img, desired_encoding='32FC1')
+            scaled_color_image = cv2.resize(color_image_cv, (0, 0), fx=1/self.downscale_factor, fy=1/self.downscale_factor, interpolation=cv2.INTER_AREA)
+            self.depth_image_cv = cv2.resize(depth_image_cv, (0, 0), fx=1/self.downscale_factor, fy=1/self.downscale_factor, interpolation=cv2.INTER_AREA)
+            pil_image = PILImage.fromarray(scaled_color_image)
         except CvBridgeError as e:
             self.get_logger().error(f"Failed to convert image: {e}")
             return
@@ -274,7 +278,7 @@ class LookWrapper(Node):
         return projected_boxes_3d
 
     def project_2d_to_3d(self, x, y, depth_value):
-        fx, fy, cx, cy = self.intrinsics['fx'], self.intrinsics['fy'], self.intrinsics['cx'], self.intrinsics['cy']
+        fx, fy, cx, cy = [self.intrinsics[k] / self.downscale_factor for k in ['fx', 'fy', 'cx', 'cy']]
         Z = depth_value
         X = (x - cx) * Z / fx
         Y = (y - cy) * Z / fy
