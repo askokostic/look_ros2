@@ -124,7 +124,7 @@ class LookWrapper(Node):
 
         projected_boxes_3d = self.project_2d_box_to_3d()
         self.publish_3d_bounding_boxes(projected_boxes_3d, color_img.header)
-        self.publish_zed_object(projected_boxes_3d)
+        self.publish_zed_object(projected_boxes_3d, pred_labels)
 
     def synced_body_image_cb(self, color_img, zed_object_array):
         try:
@@ -369,7 +369,7 @@ class LookWrapper(Node):
 
         self.marker_pub.publish(marker_array)
 
-    def publish_zed_object(self, boxes_3d):
+    def publish_zed_object(self, boxes_3d, look_pred):
         zed_detections = ObjectsStamped()
         zed_detections.header.frame_id = 'zed_left_camera_optical_frame'
         zed_detections.header.stamp = self.get_clock().now().to_msg()
@@ -436,6 +436,8 @@ class LookWrapper(Node):
             det_object.dimensions_3d[2] = height
 
             det_object.skeleton_available = False
+
+            det_object.eye_contact_confidence = float(look_pred[i])
 
             zed_detections.objects.append(det_object)
 
