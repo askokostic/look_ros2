@@ -43,6 +43,7 @@ class LookWrapper(Node):
         self.depth_image_cv = None
         self.keypoints = None
         self.boxes = None
+        self.ids = None
 
         # Set device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -88,7 +89,7 @@ class LookWrapper(Node):
         parser.add_argument('--long-edge', default=None, type=int, help='rescale the long side of the image (aspect ratio maintained)')
         parser.add_argument('--loader-workers', default=None, type=int, help='number of workers for data loading')
         parser.add_argument('--precise-rescaling', dest='fast_rescaling', default=True, action='store_false', help='use more exact image rescaling (requires scipy)')
-        parser.add_argument('--checkpoint_', default='shufflenetv2k30', type=str, help='backbone model to use')
+        parser.add_argument('--checkpoint_', default='tshufflenetv2k30', type=str, help='backbone model to use')
         parser.add_argument('--disable-cuda', action='store_true', help='disable CUDA')
 
         decoder.cli(parser)
@@ -117,7 +118,7 @@ class LookWrapper(Node):
         pred = [ann.json_data() for ann in predictions]
 
         im_size = (pil_image.size[0], pil_image.size[1])
-        self.boxes, self.keypoints = preprocess_pifpaf(pred, im_size, enlarge_boxes=False)
+        self.boxes, self.keypoints, self.ids = preprocess_pifpaf(pred, im_size, enlarge_boxes=False)
         pred_labels = self.predict_look(im_size)
 
         self.render_image(pil_image, pred_labels, color_img.header)
@@ -391,11 +392,12 @@ class LookWrapper(Node):
 
             det_object = Object()
             det_object.label = 'person'
-            det_object.label_id = i
+            det_object.label_id = self.ids[i]
             det_object.position[0] = center_x
             det_object.position[1] = center_y
             det_object.position[2] = center_z
-            det_object.tracking_available = False
+            det_object.tracking_available = True
+            det_object.tracking_state = 1
 
             # Top face
             det_object.bounding_box_3d.corners[0].kp[0] = center_x - (width / 2)
