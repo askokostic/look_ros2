@@ -12,7 +12,7 @@ import rclpy
 from rclpy.node import Node
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from visualization_msgs.msg import MarkerArray, Marker
-from zed_interfaces.msg import ObjectsStamped, Object
+from zed_msgs.msg import ObjectsStamped, Object
 
 INPUT_SIZE = 51
 
