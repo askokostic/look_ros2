@@ -13,8 +13,10 @@ from rclpy.node import Node
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from visualization_msgs.msg import MarkerArray, Marker
 from zed_msgs.msg import ObjectsStamped, Object
+from ultralytics import YOLO
 
 INPUT_SIZE = 51
+VALID_MODES = {'openpifpaf', 'yolo', 'zed'}
 
 
 class LookWrapper(Node):
@@ -26,7 +28,7 @@ class LookWrapper(Node):
         self.declare_parameter('depth_image_topic', '/zed/zed_node/depth/depth_registered')
         self.declare_parameter('color_camera_info_topic', '/zed/zed_node/rgb_raw/camera_info')
         self.declare_parameter('zed_skeletons_topic', '/zed/zed_node/body_trk/skeletons')
-        self.declare_parameter('mode', 'pifpaf')
+        self.declare_parameter('mode', 'openpifpaf')
         self.declare_parameter('downscale_factor', 1)
         self.color_image_topic = self.get_parameter('color_image_topic').value
         self.depth_image_topic = self.get_parameter('depth_image_topic').value
@@ -48,8 +50,20 @@ class LookWrapper(Node):
         # Set device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Load pifpaf
-        self.pifpaf_predictor = load_pifpaf(self.parse_pifpaf_args())
+        if self.mode not in VALID_MODES:
+            self.get_logger().fatal(
+                f"Invalid mode '{self.mode}'. Valid modes: {', '.join(sorted(VALID_MODES))}"
+            )
+            rclpy.shutdown()
+            return
+        
+        self.get_logger().info(f"Using '{self.mode}' detector")
+
+        # Load pose detector
+        if self.mode == 'openpifpaf':
+            self.pifpaf_predictor = load_pifpaf(self.parse_pifpaf_args())
+        elif self.mode == 'yolo':
+            self.yolo_model = YOLO("yolo11x-pose.pt")
 
         # Load LOOK model
         self.model = self.get_model().to(self.device)
@@ -64,16 +78,16 @@ class LookWrapper(Node):
         )
 
         self.color_img_sub = Subscriber(self, Image, self.color_image_topic)
-        self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic)
-        self.zed_body_det_sub = Subscriber(self, ObjectsStamped, self.zed_skeletons_topic)
 
-        if self.mode == 'pifpaf':
+        if self.mode in ('openpifpaf', 'yolo'):
+            self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic)
             self.depth_color_sync = ApproximateTimeSynchronizer(
                 [self.color_img_sub, self.depth_img_sub], queue_size=1, slop=0.1)
             self.depth_color_sync.registerCallback(self.synced_image_cb)
             self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
             self.zed_object_pub = self.create_publisher(ObjectsStamped, 'detection', 10)
         elif self.mode == 'zed':
+            self.zed_body_det_sub = Subscriber(self, ObjectsStamped, self.zed_skeletons_topic)
             self.body_color_sync = ApproximateTimeSynchronizer(
                 [self.color_img_sub, self.zed_body_det_sub], queue_size=1, slop=0.1)
             self.body_color_sync.registerCallback(self.synced_body_image_cb)
@@ -103,6 +117,32 @@ class LookWrapper(Node):
 
         return args
 
+    def run_openpifpaf(self, pil_image):
+        predictions, _, _ = self.pifpaf_predictor.pil_image(pil_image)
+        pred = [ann.json_data() for ann in predictions]
+
+        im_size = (pil_image.size[0], pil_image.size[1])
+        self.boxes, self.keypoints, self.ids = preprocess_pifpaf(
+            pred, im_size, enlarge_boxes=False)
+
+    def run_yolo(self, pil_image):
+        results = self.yolo_model.track(
+            source=pil_image, device=self.device, verbose=False, persist=True)
+
+        try:
+            bboxes = results[0].boxes.xyxy.cpu().tolist()
+            kps = np.concatenate((results[0].keypoints.xy.cpu().numpy().transpose(
+                0, 2, 1), results[0].keypoints.conf.cpu().numpy()[:, None, :]), axis=1).tolist()
+            ids = results[0].boxes.id.cpu().int().tolist()
+        except (AttributeError, TypeError):
+            bboxes = []
+            ids = []
+            kps = []
+
+        self.boxes = bboxes
+        self.ids = ids
+        self.keypoints = kps
+
     def synced_image_cb(self, color_img, depth_img):
         try:
             color_image_cv = self.bridge.imgmsg_to_cv2(color_img, desired_encoding='rgb8')
@@ -114,11 +154,12 @@ class LookWrapper(Node):
             self.get_logger().error(f"Failed to convert image: {e}")
             return
 
-        predictions, _, _ = self.pifpaf_predictor.pil_image(pil_image)
-        pred = [ann.json_data() for ann in predictions]
+        if self.mode == 'openpifpaf':
+            self.run_openpifpaf(pil_image)
+        elif self.mode == 'yolo':
+            self.run_yolo(pil_image)
 
         im_size = (pil_image.size[0], pil_image.size[1])
-        self.boxes, self.keypoints, self.ids = preprocess_pifpaf(pred, im_size, enlarge_boxes=False)
         pred_labels = self.predict_look(im_size)
 
         self.render_image(pil_image, pred_labels, color_img.header)
@@ -192,7 +233,7 @@ class LookWrapper(Node):
             exit(0)"""
             raise NotImplementedError
         model.load_state_dict(torch.load(os.path.join(
-            self.path_model, 'LookingModel_LOOK+PIE.p'), map_location=self.device))
+            self.path_model, 'LookingModel_LOOK+PIE.p'), map_location=self.device, weights_only=True))
         model.eval()
         return model
 
