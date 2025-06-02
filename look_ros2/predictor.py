@@ -30,12 +30,14 @@ class LookWrapper(Node):
         self.declare_parameter('zed_skeletons_topic', '/zed/zed_node/body_trk/skeletons')
         self.declare_parameter('mode', 'openpifpaf')
         self.declare_parameter('downscale_factor', 1)
+        self.declare_parameter('yolo_model', 'yolo11x-pose.pt')
         self.color_image_topic = self.get_parameter('color_image_topic').value
         self.depth_image_topic = self.get_parameter('depth_image_topic').value
         self.color_camera_info_topic = self.get_parameter('color_camera_info_topic').value
         self.zed_skeletons_topic = self.get_parameter('zed_skeletons_topic').value
         self.mode = self.get_parameter('mode').value
         self.downscale_factor = self.get_parameter('downscale_factor').value
+        self.yolo_model = self.get_parameter('yolo_model').value
 
         # Variables
         self.transparency = 0.4
@@ -63,7 +65,7 @@ class LookWrapper(Node):
         if self.mode == 'openpifpaf':
             self.pifpaf_predictor = load_pifpaf(self.parse_pifpaf_args())
         elif self.mode == 'yolo':
-            self.yolo_model = YOLO("yolo11x-pose.pt")
+            self.yolo_model = YOLO(self.yolo_model)
 
         # Load LOOK model
         self.model = self.get_model().to(self.device)
