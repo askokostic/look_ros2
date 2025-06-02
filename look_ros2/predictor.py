@@ -433,7 +433,7 @@ class LookWrapper(Node):
 
             det_object = Object()
             det_object.label = 'person'
-            det_object.label_id = self.ids[i]
+            det_object.label_id = self.ids[i] if self.ids[i] is not None else i
             det_object.position[0] = center_x
             det_object.position[1] = center_y
             det_object.position[2] = center_z
