@@ -33,6 +33,16 @@ The `zed-ros2-wrapper` and `zed-ros2-interfaces` repositories on the `humble-v4.
 pip install -r look_ros2/requirements.txt
 ```
 
+4. Pathc YOLO‐pose (if you want to use `yolo` mode)
+
+YOLO‑Pose hides key‑points whose confidence falls below a threshold; because LOOK expects all 34 key‑points for gaze estimation, you can disable this filtering with the following script:
+
+```
+bash scripts/patch_yolo_pose.sh
+```
+
+Running the script toggles the patch - execute it once to apply and again to revert
+
 ## Configuration
 Available parameters:
 
@@ -40,10 +50,10 @@ Available parameters:
 - `depth_image_topic` (default: `/zed/zed_node/depth/depth_registered`)
 - `color_camera_info_topic` (default: `/zed/zed_node/rgb_raw/camera_info`)
 - `zed_skeletons_topic` (default: `/zed/zed_node/body_trk/skeletons`)
-- `mode` (`pifpaf` or `zed`, default: `pifpaf`)
+- `mode` (`openpifpaf`, `yolo` or `zed`, default: `openpifpaf`)
 - `downscale_factor` (default: `1`)
 
 ### Note on `downscale_factor`:
 
-- In `pifpaf` mode: it downscales the input image before processing, **improving performance** by reducing processing time.
-- In `zed` mode: it **only affects visualization**. The ZED SDK always processes keypoints at full sensor resolution internally, regardless of the published image resolution.
+- In `openpifpaf` mode: it downscales the input image before processing, **improving performance** by reducing processing time.
+- In `yolo` or `zed` mode: it **only affects visualization**. The ZED SDK always processes keypoints internally, regardless of the published image resolution.
