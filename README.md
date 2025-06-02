@@ -7,8 +7,8 @@ This repo integrates [LOOK](https://github.com/vita-epfl/looking), a keypoint-ba
 - ROS2 Humble
 - ZED SDK
 - Forked ZED repositories (for ZED body detection compatibility with LOOK)
-  - [zed-ros2-wrapper](https://github.com/askokostic/zed-ros2-interfaces/tree/humble-v4.1.4-skc)
-  - [zed-ros2-interfaces](https://github.com/askokostic/zed-ros2-wrapper/tree/humble-v4.1.4-skc)
+  - [zed-ros2-wrapper](https://github.com/askokostic/zed-ros2-wrapper/tree/humble-v4.2.5-skc)
+  - [zed-ros2-interfaces](https://github.com/askokostic/zed-ros2-interfaces/tree/humble-skc)
 
 **Note:** The above forks have been extended to include confidence scores for each keypoint, which is required by LOOK.
   
@@ -23,12 +23,12 @@ git clone --recursive https://github.com/askokostic/look_ros2.git
 2. Clone forked ZED repositories
 
 ```
-git clone https://github.com/askokostic/zed-ros2-wrapper.git -b humble-v4.1.4-skc
-git clone https://github.com/askokostic/zed-ros2-interfaces.git -b humble-v4.1.4-skc
+git clone https://github.com/askokostic/zed-ros2-wrapper.git -b humble-v4.2.5-skc
+git clone https://github.com/askokostic/zed-ros2-interfaces.git -b humble-skc
 ```
-The `zed-ros2-wrapper` and `zed-ros2-interfaces` repositories on the `humble-v4.1.4-skc` branch have been extended to include confidence scores for each keypoint. This is necessary for LOOK to work properly.
+The `zed-ros2-wrapper` and `zed-ros2-interfaces` repositories on the `humble-v4.2.5-skc` and `humble-skc` branches have been extended to include confidence scores for each keypoint. This is necessary for LOOK to work properly.
 
-1. Install python dependencies
+3. Install python dependencies
 ```
 pip install -r look_ros2/requirements.txt
 ```
