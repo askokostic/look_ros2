@@ -12,6 +12,7 @@ import rclpy
 from rclpy.node import Node
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from visualization_msgs.msg import MarkerArray, Marker
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from zed_msgs.msg import ObjectsStamped, Object
 from ultralytics import YOLO
 
@@ -72,6 +73,13 @@ class LookWrapper(Node):
 
         self.bridge = CvBridge()
 
+        custom_qos = QoSProfile(
+            history     = HistoryPolicy.KEEP_LAST,
+            depth       = 1,
+            reliability = ReliabilityPolicy.RELIABLE,
+            durability  = rclpy.qos.DurabilityPolicy.VOLATILE
+        )
+
         self.color_camera_info_sub = self.create_subscription(
             CameraInfo,
             self.color_camera_info_topic,
@@ -79,17 +87,17 @@ class LookWrapper(Node):
             10
         )
 
-        self.color_img_sub = Subscriber(self, Image, self.color_image_topic)
+        self.color_img_sub = Subscriber(self, Image, self.color_image_topic, qos_profile=custom_qos)
 
         if self.mode in ('openpifpaf', 'yolo'):
-            self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic)
+            self.depth_img_sub = Subscriber(self, Image, self.depth_image_topic, qos_profile=custom_qos)
             self.depth_color_sync = ApproximateTimeSynchronizer(
                 [self.color_img_sub, self.depth_img_sub], queue_size=1, slop=0.1)
             self.depth_color_sync.registerCallback(self.synced_image_cb)
             self.marker_pub = self.create_publisher(MarkerArray, 'bounding_boxes_marker_array', 1)
             self.zed_object_pub = self.create_publisher(ObjectsStamped, 'detection', 10)
         elif self.mode == 'zed':
-            self.zed_body_det_sub = Subscriber(self, ObjectsStamped, self.zed_skeletons_topic)
+            self.zed_body_det_sub = Subscriber(self, ObjectsStamped, self.zed_skeletons_topic, qos_profile=custom_qos)
             self.body_color_sync = ApproximateTimeSynchronizer(
                 [self.color_img_sub, self.zed_body_det_sub], queue_size=1, slop=0.1)
             self.body_color_sync.registerCallback(self.synced_body_image_cb)
