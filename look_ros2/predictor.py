@@ -114,7 +114,7 @@ class LookWrapper(Node):
         show.cli(parser)
         visualizer.cli(parser)
 
-        args = parser.parse_args()
+        args, _ = parser.parse_known_args()
         args.device = self.device
 
         return args
